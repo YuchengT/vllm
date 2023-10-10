@@ -22,6 +22,7 @@ def main(args: argparse.Namespace):
         tensor_parallel_size=args.tensor_parallel_size,
         max_num_seqs=args.batch_size,
         max_num_batched_tokens=args.batch_size * args.input_len,
+        gpu_memory_utilization=args.gpu_memory_utilization,
         trust_remote_code=args.trust_remote_code,
         dtype=args.dtype,
     )
@@ -48,12 +49,12 @@ def main(args: argparse.Namespace):
     print(sampling_params)
     dummy_prompt_token_ids = [[0] * args.input_len] * args.batch_size
 
-    def run_to_completion(llm_model, profile: bool = False):
+    def run_to_completion(llm_model, token_ids, profile: bool = False):
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
         start_time = time.perf_counter()
 
-        llm_model.generate(prompt_token_ids=dummy_prompt_token_ids,
+        llm_model.generate(prompt_token_ids=token_ids,
                      sampling_params=sampling_params,
                      use_tqdm=False)
 
@@ -64,15 +65,14 @@ def main(args: argparse.Namespace):
         return latency
 
     print("Warming up...")
-    run_to_completion(draft_llm, profile=False)
-    run_to_completion(target_llm, profile=False)
+    run_to_completion(draft_llm, dummy_prompt_token_ids, profile=False)
 
     # Benchmark.
     draft_latencies = []
     target_latencies = []
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
-        draft_latencies.append(run_to_completion(draft_llm, profile=False))
-        target_latencies.append(run_to_completion(target_llm, profile=False))
+        draft_latencies.append(run_to_completion(draft_llm, dummy_prompt_token_ids, profile=False))
+        target_latencies.append(run_to_completion(target_llm, dummy_prompt_token_ids, profile=False))
     print(f'Avg draft latency: {np.mean(draft_latencies)} seconds')
     print(f'Avg target latency: {np.mean(target_latencies)} seconds')
 
@@ -80,16 +80,17 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         description='Benchmark the latency of processing a single batch of '
         'requests till completion.')
-    parser.add_argument('--target_model', type=str, default='decapoda-research/llama-13b-hf')
-    parser.add_argument('--draft_model', type=str, default='decapoda-research/llama-7b-hf')
+    parser.add_argument('--target_model', type=str, default='facebook/opt-6.7b')
+    parser.add_argument('--draft_model', type=str, default='facebook/opt-125m')
     parser.add_argument('--tokenizer', type=str, default=None)
     parser.add_argument('--quantization',
                         '-q',
                         choices=['awq', None],
                         default=None)
     parser.add_argument('--tensor-parallel-size', '-tp', type=int, default=1)
-    parser.add_argument('--input-len', type=int, default=32)
-    parser.add_argument('--output-len', type=int, default=128)
+    parser.add_argument('--gpu-memory-utilization', '-gputil', type=float, default=0.7)
+    parser.add_argument('--input-len', type=int, default=256)
+    parser.add_argument('--output-len', type=int, default=512)
     parser.add_argument('--batch-size', type=int, default=8)
     parser.add_argument('--n',
                         type=int,
@@ -98,7 +99,7 @@ if __name__ == '__main__':
     parser.add_argument('--use-beam-search', action='store_true')
     parser.add_argument('--num-iters',
                         type=int,
-                        default=3,
+                        default=10,
                         help='Number of iterations to run.')
     parser.add_argument('--trust-remote-code',
                         action='store_true',
