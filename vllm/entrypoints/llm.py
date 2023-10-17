@@ -70,6 +70,7 @@ class LLM:
         tokenizer_revision: Optional[str] = None,
         seed: int = 0,
         gpu_memory_utilization: float = 0.9,
+        draft_len: int = 4,
         swap_space: int = 4,
         **kwargs,
     ) -> None:
@@ -87,6 +88,7 @@ class LLM:
             tokenizer_revision=tokenizer_revision,
             seed=seed,
             gpu_memory_utilization=gpu_memory_utilization,
+            draft_len=draft_len,
             swap_space=swap_space,
             **kwargs,
         )
@@ -174,7 +176,7 @@ class LLM:
         # Run the engine.
         outputs: List[RequestOutput] = []
         while self.llm_engine.has_unfinished_requests():
-            step_outputs = self.llm_engine.step()
+            step_outputs = self.llm_engine.ssp_step()
             for output in step_outputs:
                 if output.finished:
                     outputs.append(output)

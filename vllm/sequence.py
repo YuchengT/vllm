@@ -238,7 +238,7 @@ class SequenceGroup:
 
     def get_max_num_running_seqs(self) -> int:
         """The maximum number of sequences running in parallel in the remaining
-        lifetime of the request."""
+        lifetime of the request.""" 
         if self.sampling_params.use_beam_search:
             # For beam search, maximally there will always be `best_of` beam
             # candidates running in the future.

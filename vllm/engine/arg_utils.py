@@ -31,6 +31,7 @@ class EngineArgs:
     revision: Optional[str] = None
     tokenizer_revision: Optional[str] = None
     quantization: Optional[str] = None
+    draft_len: int = 4
 
     def __post_init__(self):
         if self.tokenizer is None:
@@ -159,6 +160,10 @@ class EngineArgs:
         parser.add_argument('--disable-log-stats',
                             action='store_true',
                             help='disable logging statistics')
+        parser.add_argument('--draft-len',
+                            type=int,
+                            default=EngineArgs.draft_len,
+                            help='length of draft tokens in ssp')
         # Quantization settings.
         parser.add_argument('--quantization',
                             '-q',
@@ -193,7 +198,8 @@ class EngineArgs:
                                          self.worker_use_ray)
         scheduler_config = SchedulerConfig(self.max_num_batched_tokens,
                                            self.max_num_seqs,
-                                           model_config.max_model_len)
+                                           model_config.max_model_len,
+                                           self.draft_len)
         return model_config, cache_config, parallel_config, scheduler_config
 
 

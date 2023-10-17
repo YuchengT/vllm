@@ -2,6 +2,7 @@ import copy
 import time
 from functools import partial
 from typing import TYPE_CHECKING, Any, Iterable, List, Optional, Tuple, Union
+import numpy as np
 
 from vllm.config import (CacheConfig, ModelConfig, ParallelConfig,
                          SchedulerConfig)
@@ -562,6 +563,59 @@ class LLMEngine:
         )
 
         return self._process_model_outputs(output, scheduler_outputs) + ignored
+    
+    def ssp_step(self) -> List[RequestOutput]:
+        """
+        """
+        for i in range(self.scheduler_config.draft_len):
+            seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
+            if scheduler_outputs.is_empty():
+                return ignored
+
+            # Execute the model.
+            output = self._run_workers(
+                "execute_model",
+                seq_group_metadata_list=seq_group_metadata_list,
+                blocks_to_swap_in=scheduler_outputs.blocks_to_swap_in,
+                blocks_to_swap_out=scheduler_outputs.blocks_to_swap_out,
+                blocks_to_copy=scheduler_outputs.blocks_to_copy,
+            )
+
+            # Update the scheduled sequence groups with the model outputs.
+            scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
+            for seq_group, samples in zip(scheduled_seq_groups, output):
+                self._process_sequence_group_samples(seq_group, samples)
+
+            # Free the finished sequence groups.
+            self.scheduler.free_finished_seq_groups()
+
+        #reject random number of token in the draft_len tail of each sequence.
+        
+        seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
+        scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
+        for seq_group in scheduled_seq_groups:
+            seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+            n_reject = np.random.randint(0, self.scheduler_config.draft_len, size=len(seqs))
+            for i, seq in enumerate(seqs):
+                append_id = np.random.randint(self.model_config.hf_config.vocab_size)
+                if n_reject[i] > 0:
+                    seq.data.output_token_ids = seq.data.output_token_ids[:-1 * n_reject[i]]
+                seq.data.append_token_id(append_id, 0.0)
+                seq._append_tokens_to_blocks([append_id])
+        
+        # Create the outputs.
+        request_outputs: List[RequestOutput] = []
+        for seq_group in (scheduled_seq_groups +
+                          scheduler_outputs.ignored_seq_groups):
+            request_output = RequestOutput.from_seq_group(seq_group)
+            request_outputs.append(request_output)
+
+        if self.log_stats:
+            # Log the system stats.
+            self._log_system_stats(scheduler_outputs.prompt_run,
+                                   scheduler_outputs.num_batched_tokens)
+            
+        return request_outputs + ignored
 
     def _log_system_stats(
         self,
