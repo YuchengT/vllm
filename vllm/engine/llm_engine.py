@@ -597,7 +597,7 @@ class LLMEngine:
             seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
             n_reject = np.random.randint(0, self.scheduler_config.draft_len, size=len(seqs))
             for i, seq in enumerate(seqs):
-                append_id = np.random.randint(self.model_config.hf_config.vocab_size)
+                append_id = np.random.randint(0, self.model_config.hf_config.vocab_size)
                 if n_reject[i] > 0:
                     seq.data.output_token_ids = seq.data.output_token_ids[:-1 * n_reject[i]]
                 seq.data.append_token_id(append_id, 0.0)
