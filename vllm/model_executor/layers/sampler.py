@@ -498,5 +498,5 @@ def _sample(
             result_idx += num_results
         assert sample_idx == num_tokens
         category_start_idx += num_tokens
-
+        
     return [seq_outputs_dict[i] for i in range(len(input_metadata.seq_groups))]

@@ -60,34 +60,47 @@ class SequenceData:
     ) -> None:
         self.prompt_token_ids = prompt_token_ids
         self.output_token_ids: List[int] = []
+        self.pending_token_ids: List[int] = []
         self.cumulative_logprob = 0.0
+        self.pending_logprob: List[float] = []
 
     def append_token_id(self, token_id: int, logprob: float) -> None:
         self.output_token_ids.append(token_id)
         self.cumulative_logprob += logprob
+    
+    def append_pending_token_id(self, token_id: int, logprob: float) -> None:
+        self.pending_token_ids.append(token_id)
+        self.pending_logprob.append(logprob)
 
     def get_len(self) -> int:
-        return len(self.output_token_ids) + len(self.prompt_token_ids)
+        return len(self.output_token_ids) + len(self.prompt_token_ids) + len(self.pending_token_ids)
 
     def get_prompt_len(self) -> int:
         return len(self.prompt_token_ids)
 
     def get_output_len(self) -> int:
         return len(self.output_token_ids)
+    
+    def get_pending_len(self) -> int:
+        return len(self.pending_token_ids)
 
     def get_token_ids(self) -> List[int]:
-        return self.prompt_token_ids + self.output_token_ids
+        return self.prompt_token_ids + self.output_token_ids + self.pending_token_ids
 
     def get_last_token_id(self) -> int:
-        if not self.output_token_ids:
-            return self.prompt_token_ids[-1]
-        return self.output_token_ids[-1]
+        if not self.pending_token_ids:
+            if not self.output_token_ids:
+                return self.prompt_token_ids[-1]
+            return self.output_token_ids[-1]
+        return self.pending_token_ids[-1]
 
     def __repr__(self) -> str:
         return (f"SequenceData("
                 f"prompt_token_ids={self.prompt_token_ids}, "
                 f"output_token_ids={self.output_token_ids}, "
-                f"cumulative_logprob={self.cumulative_logprob})")
+                f"pending_token_ids={self.pending_token_ids}, "
+                f"cumulative_logprob={self.cumulative_logprob}),"
+                f"pending_logprob={self.pending_logprob})")
 
 
 class Sequence:
@@ -114,6 +127,7 @@ class Sequence:
 
         self.data = SequenceData(prompt_token_ids)
         self.output_logprobs: List[Dict[int, float]] = []
+        self.pending_logprobs: List[Dict[int, float]] = []
         self.output_text = ""
 
         self.logical_token_blocks: List[LogicalTokenBlock] = []
@@ -149,6 +163,15 @@ class Sequence:
             last_block.append_tokens(token_ids[cursor:cursor +
                                                num_empty_slots])
             cursor += num_empty_slots
+    
+    def _remove_rejected_tokens_from_blocks(self, last_k: int) -> None:
+        cursor = last_k
+        while cursor > self.logical_token_blocks[-1].num_tokens:
+            cursor -= self.logical_token_blocks[-1].num_tokens
+            self.logical_token_blocks.pop(-1)
+        
+        last_block = self.logical_token_blocks[-1]
+        last_block.num_tokens -= cursor
 
     def append_token_id(
         self,
@@ -159,6 +182,27 @@ class Sequence:
         self._append_tokens_to_blocks([token_id])
         self.output_logprobs.append(logprobs)
         self.data.append_token_id(token_id, logprobs[token_id])
+    
+    def append_pending_token_id(self,
+        token_id: int,
+        logprobs: Dict[int, float]) -> None:
+        assert token_id in logprobs
+        self._append_tokens_to_blocks([token_id])
+        self.pending_logprobs.append(logprobs)
+        self.data.append_pending_token_id(token_id, logprobs[token_id])
+    
+    def validate_pending_token(self, num_rejected: int) -> None:
+        assert num_rejected <= self.get_pending_len()
+        num_accepted = self.get_pending_len() - num_rejected
+        for i in range(num_accepted):
+            token_id = self.data.pending_token_ids.pop(0)
+            logprob = self.data.pending_logprob.pop(0)
+            self.data.append_token_id(token_id, logprob)
+            self.output_logprobs.append(self.pending_logprobs.pop(0))
+        self.data.pending_token_ids = []
+        self.data.pending_logprob = []
+        self.pending_logprobs = []
+        self._remove_rejected_tokens_from_blocks(num_rejected)
 
     def get_len(self) -> int:
         return self.data.get_len()
@@ -168,6 +212,9 @@ class Sequence:
 
     def get_output_len(self) -> int:
         return self.data.get_output_len()
+    
+    def get_pending_len(self) -> int:
+        return self.data.get_pending_len()
 
     def get_token_ids(self) -> List[int]:
         return self.data.get_token_ids()

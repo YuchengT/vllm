@@ -515,6 +515,68 @@ class LLMEngine:
                 # iteration
                 seq_group.remove(seq.seq_id)
                 self.scheduler.free_seq(seq)
+    
+    # processing the output samples in Speculative Sampling, by adding new draft tokens to pending token list.
+    def _process_ssp_sequence_group_samples(
+            self, seq_group: SequenceGroup,
+            samples: List[SequenceOutputs]) -> None:
+        parent_seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
+        parent_child_dict = {
+            parent_seq.seq_id: []
+            for parent_seq in parent_seqs
+        }
+        for sample in samples:
+            parent_child_dict[sample.parent_seq_id].append(sample)
+        # List of (child, parent)
+        child_seqs: List[Tuple[Sequence, Sequence]] = []
+
+        # Process the child samples for each parent sequence
+        for parent in parent_seqs:
+            child_samples: List[SequenceOutputs] = parent_child_dict[
+                parent.seq_id]
+            if len(child_samples) == 0:
+                # This parent sequence has no children samples. Remove
+                # the parent sequence from the sequence group since it will
+                # not be used in the future iterations.
+                parent.status = SequenceStatus.FINISHED_ABORTED
+                seq_group.remove(parent.seq_id)
+                self.scheduler.free_seq(parent)
+                continue
+            # Fork the parent sequence if there are multiple child samples.
+            for child_sample in child_samples[:-1]:
+                new_child_seq_id = next(self.seq_counter)
+                child = parent.fork(new_child_seq_id)
+                child.append_pending_token_id(child_sample.output_token,
+                                      child_sample.logprobs)
+                child_seqs.append((child, parent))
+            # Continue the parent sequence for the last child sample.
+            # We reuse the parent sequence here to reduce redundant memory
+            # copies, especially when using non-beam search sampling methods.
+            last_child_sample = child_samples[-1]
+            parent.append_pending_token_id(last_child_sample.output_token,
+                                   last_child_sample.logprobs)
+            child_seqs.append((parent, parent))
+
+        for seq, _ in child_seqs:
+            self._check_stop(seq, seq_group.sampling_params)
+
+        assert not seq_group.sampling_params.use_beam_search
+        # For newly created child sequences, add them to the sequence group
+        # and fork them in block manager if they are not finished.
+        for seq, parent in child_seqs:
+            if seq is not parent:
+                seq_group.add(seq)
+                if not seq.is_finished():
+                    self.scheduler.fork_seq(parent, seq)
+
+        # Free the finished and selected parent sequences' memory in block
+        # manager. Keep them in the sequence group as candidate output.
+        # NOTE: we need to fork the new sequences before freeing the
+        # old sequences.
+        for seq, parent in child_seqs:
+            if seq is parent and seq.is_finished():
+                self.scheduler.free_seq(seq)
+        return
 
     def _process_model_outputs(
             self, output: SamplerOutput,
@@ -584,25 +646,31 @@ class LLMEngine:
             # Update the scheduled sequence groups with the model outputs.
             scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
             for seq_group, samples in zip(scheduled_seq_groups, output):
-                self._process_sequence_group_samples(seq_group, samples)
+                self._process_ssp_sequence_group_samples(seq_group, samples)
 
             # Free the finished sequence groups.
             self.scheduler.free_finished_seq_groups()
 
         #reject random number of token in the draft_len tail of each sequence.
-        
         seq_group_metadata_list, scheduler_outputs, ignored = self._schedule()
         scheduled_seq_groups = scheduler_outputs.scheduled_seq_groups
         for seq_group in scheduled_seq_groups:
             seqs = seq_group.get_seqs(status=SequenceStatus.RUNNING)
-            n_reject = np.random.randint(0, self.scheduler_config.draft_len, size=len(seqs))
+            n_rejected = np.random.randint(0, self.scheduler_config.draft_len, size=len(seqs))
+            n_accepted = self.scheduler_config.draft_len - n_rejected
             for i, seq in enumerate(seqs):
-                append_id = np.random.randint(0, self.model_config.hf_config.vocab_size)
-                if n_reject[i] > 0:
-                    seq.data.output_token_ids = seq.data.output_token_ids[:-1 * n_reject[i]]
-                seq.data.append_token_id(append_id, 0.0)
-                seq._append_tokens_to_blocks([append_id])
+                #append_id = np.random.randint(0, self.model_config.hf_config.vocab_size)
+                seq.validate_pending_token(n_rejected[i])
+                #seq.data.append_token_id(append_id, 0.0)
+                #seq._append_tokens_to_blocks([append_id])
+                self._decode_ssp_validated_sequence(seq, seq_group.sampling_params, n_accepted[i])
+                if seq.get_len() > 512:
+                    seq.status = SequenceStatus.FINISHED_LENGTH_CAPPED
+                if seq.is_finished():
+                    self.scheduler.free_seq(seq)
         
+        self.scheduler.free_finished_seq_groups()
+                
         # Create the outputs.
         request_outputs: List[RequestOutput] = []
         for seq_group in (scheduled_seq_groups +
@@ -699,6 +767,27 @@ class LLMEngine:
         seq.prefix_offset = prefix_offset
         seq.read_offset = read_offset
         seq.output_text += new_output_text
+
+    def _decode_ssp_validated_sequence(self, seq: Sequence,
+                         sampling_params: SamplingParams, num_accepted) -> None:
+        """Decodes the new token for a sequence."""
+        for i in range(num_accepted):
+            (new_tokens, new_output_text, prefix_offset,
+            read_offset) = detokenize_incrementally(
+                self.tokenizer,
+                all_input_ids=seq.get_token_ids()[:-num_accepted+i],
+                prev_tokens=seq.tokens,
+                prefix_offset=seq.prefix_offset,
+                read_offset=seq.read_offset,
+                skip_special_tokens=sampling_params.skip_special_tokens,
+            )
+            if seq.tokens is None:
+                seq.tokens = new_tokens
+            else:
+                seq.tokens.extend(new_tokens)
+            seq.prefix_offset = prefix_offset
+            seq.read_offset = read_offset
+            seq.output_text += new_output_text
 
     def _check_stop(self, seq: Sequence,
                     sampling_params: SamplingParams) -> None:

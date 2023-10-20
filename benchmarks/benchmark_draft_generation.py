@@ -37,7 +37,24 @@ def main(args: argparse.Namespace):
     )
     print(sampling_params)
     dummy_prompt_token_ids = [[0] * args.input_len] * args.batch_size
+    
+    # Sample prompts.
+    prompts = [
+        "Hello, my name is",
+        "The president of the United States is",
+        "The capital of France is",
+        "The future of AI is",
+    ]
 
+    outputs = draft_llm.generate(prompts, sampling_params=sampling_params, use_tqdm=False)
+    print(len(outputs))
+    # Print the outputs.
+    for output in outputs:
+        prompt = output.prompt
+        generated_text = output.outputs[0].text
+        print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    
+    '''
     def run_to_completion(llm_model, token_ids, profile: bool = False):
         if profile:
             torch.cuda.cudart().cudaProfilerStart()
@@ -61,6 +78,7 @@ def main(args: argparse.Namespace):
     for _ in tqdm(range(args.num_iters), desc="Profiling iterations"):
         draft_latencies.append(run_to_completion(draft_llm, dummy_prompt_token_ids, profile=False))
     print(f'Avg draft latency: {np.mean(draft_latencies)} seconds')
+    '''
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(
